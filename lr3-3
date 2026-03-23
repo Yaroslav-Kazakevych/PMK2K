@@ -29,15 +29,15 @@ int main(void)
     SW_Tx_UART_Start();
     initMatrix();
 
-    /* Заданий пароль (наприклад: "1", "2", "3") */
-    uint8_t password[3] = {1, 2, 3}; 
-    uint8_t input_buffer[3] = {0, 0, 0};
+    /* Заданий пароль на 5 символів (наприклад: 1, 2, 3, 4, 5) */
+    uint8_t password[5] = {1, 2, 3, 4, 5}; 
+    uint8_t input_buffer[5] = {0, 0, 0, 0, 0}; /* Буфер збільшено до 5 */
     uint8_t input_index = 0;
     
-    /* Змінна для фіксації відпускання кнопки (щоб одне натискання не зчитувалось 100 разів підряд) */
+    /* Змінна для фіксації відпускання кнопки */
     uint8_t last_pressed_key = 255;
 
-    SW_Tx_UART_PutString("Enter 3-digit password:\r\n");
+    SW_Tx_UART_PutString("Enter 5-digit password:\r\n");
 
     for(;;)
     {
@@ -60,13 +60,15 @@ int main(void)
             
             SW_Tx_UART_PutString("*"); /* Візуальний зв'язок у консолі */
             
-            if (input_index >= 3) { /* Коли введено 3 символи */
+            if (input_index >= 5) { /* Чекаємо, поки введуть 5 символів */
                 SW_Tx_UART_PutString("\r\n");
                 
-                /* Перевірка на співпадіння з правильним паролем */
+                /* Перевірка на співпадіння всіх 5 символів з паролем */
                 if (input_buffer[0] == password[0] && 
                     input_buffer[1] == password[1] && 
-                    input_buffer[2] == password[2]) 
+                    input_buffer[2] == password[2] &&
+                    input_buffer[3] == password[3] &&
+                    input_buffer[4] == password[4]) 
                 {
                     SW_Tx_UART_PutString("Access allowed\r\n"); 
                 } else {
@@ -75,13 +77,13 @@ int main(void)
                 
                 /* Скидаємо індекс, щоб дозволити новий ввід */
                 input_index = 0;
-                SW_Tx_UART_PutString("\r\nEnter 3-digit password:\r\n");
+                SW_Tx_UART_PutString("\r\nEnter 5-digit password:\r\n");
             }
         }
         
         /* Зберігаємо поточну кнопку для наступного проходу (для виявлення відпускання) */
         last_pressed_key = current_key; 
         
-        CyDelay(50); /* Невелика затримка (50мс) для уникнення "брязкоту" контактів кнопок */
+        CyDelay(50); /* Затримка від брязкоту контактів */
     }
 }
