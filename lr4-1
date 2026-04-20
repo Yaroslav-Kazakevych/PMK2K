@@ -1,6 +1,5 @@
 #include "project.h"
 
-// --- Matrix dimensions: 4 rows x 3 cols ---
 #define ROWS 4
 #define COLS 3
 
@@ -21,11 +20,17 @@ static const uint8_t LED_NUM[] = {
     0x83, // [12] b
     0xC6, // [13] C
     0xA1, // [14] d
-    0x86, // [15] E  ← новий
-    0x8E  // [16] F  ← новий
+    0x86, // [15] E
+    0x8E  // [16] F
 };
 
-// Normal key map: '*' (row3,col0) is now SHIFT — mapped to 0xFF (sentinel)
+// Human-readable names for UART output
+static const char* const SYM_NAME[] = {
+    "0","1","2","3","4","5","6","7","8","9",
+    "-","A","b","C","d","E","F"
+};
+
+// Normal mode: '*' (row3,col0) = SHIFT sentinel (0xFF)
 static const uint8_t key_map[ROWS][COLS] = {
     { 1,  2, 11}, // 1,  2,  A
     { 4,  5, 12}, // 4,  5,  b
@@ -33,21 +38,22 @@ static const uint8_t key_map[ROWS][COLS] = {
     {0xFF, 0, 14} // *(SHIFT), 0, d
 };
 
-// Shift key map: only '1'→E, '2'→F differ; rest identical to key_map
+// Shift mode: only '1'→E(15), '2'→F(16) differ
 static const uint8_t shift_key_map[ROWS][COLS] = {
     {15, 16, 11}, // E,  F,  A
     { 4,  5, 12}, // 4,  5,  b
     { 7,  8, 13}, // 7,  8,  C
-    {0xFF, 0, 14} // *(SHIFT), 0, d
+    {0xFF, 0, 14} // *(cancel), 0, d
 };
 
 static uint8_t keys[ROWS][COLS];
 static uint8_t last_keys[ROWS][COLS];
-static uint8_t shift_mode = 0; // 0=normal, 1=shift active
+static uint8_t shift_mode  = 0; // 1 = shift active (one-shot)
+static uint8_t last_symbol = 10; // index into LED_NUM, shown on display
 
-// ── 74HC595 ──────────────────────────────────────────────────────────────────
+// ── 74HC595 ───────────────────────────────────────────────────────────────────
 
-static void FourDigit74HC595_sendData(uint8_t data) {
+static void HC595_sendByte(uint8_t data) {
     for (uint8_t i = 0; i < 8; i++) {
         Pin_DO_Write((data & (0x80 >> i)) ? 1 : 0);
         Pin_CLK_Write(1);
@@ -55,25 +61,26 @@ static void FourDigit74HC595_sendData(uint8_t data) {
     }
 }
 
-static void FourDigit74HC595_sendOneDigit(uint8_t position,
-                                          uint8_t digit_index,
-                                          uint8_t dot) {
-    if (position >= 4) {
-        FourDigit74HC595_sendData(0xFF);
-        FourDigit74HC595_sendData(0xFF);
+// position: 0-3 (digit position on display)
+// sym_idx:  index into LED_NUM
+// dot:      1 = decimal point ON
+static void display_show(uint8_t position, uint8_t sym_idx, uint8_t dot) {
+    if (position >= 4 || sym_idx >= 17) {
+        HC595_sendByte(0xFF);
+        HC595_sendByte(0xFF);
         return;
     }
-    FourDigit74HC595_sendData(0xFF & ~(1u << position));
-    uint8_t pattern = LED_NUM[digit_index];
-    if (dot) pattern &= 0x7F; // увімкнути крапку (active-low)
-    FourDigit74HC595_sendData(pattern);
+    HC595_sendByte(0xFF & ~(1u << position));
+    uint8_t pattern = LED_NUM[sym_idx];
+    if (dot) pattern &= 0x7F; // bit7=0 → dot ON (active-low)
+    HC595_sendByte(pattern);
     Pin_Latch_Write(1);
     Pin_Latch_Write(0);
 }
 
 // ── Pin wrappers ──────────────────────────────────────────────────────────────
 
-static void setColumnDriveMode(uint8_t col, uint8_t mode) {
+static void col_drive(uint8_t col, uint8_t mode) {
     switch (col) {
         case 0: COLUMN_0_SetDriveMode(mode); break;
         case 1: COLUMN_1_SetDriveMode(mode); break;
@@ -81,15 +88,15 @@ static void setColumnDriveMode(uint8_t col, uint8_t mode) {
     }
 }
 
-static void setColumnWrite(uint8_t col, uint8_t value) {
+static void col_write(uint8_t col, uint8_t val) {
     switch (col) {
-        case 0: COLUMN_0_Write(value); break;
-        case 1: COLUMN_1_Write(value); break;
-        case 2: COLUMN_2_Write(value); break;
+        case 0: COLUMN_0_Write(val); break;
+        case 1: COLUMN_1_Write(val); break;
+        case 2: COLUMN_2_Write(val); break;
     }
 }
 
-static uint8_t readRow(uint8_t row) {
+static uint8_t row_read(uint8_t row) {
     switch (row) {
         case 0: return ROW_0_Read();
         case 1: return ROW_1_Read();
@@ -99,28 +106,34 @@ static uint8_t readRow(uint8_t row) {
     }
 }
 
-// ── Matrix logic ──────────────────────────────────────────────────────────────
+// ── RGB helper ────────────────────────────────────────────────────────────────
 
-static void initMatrix(void) {
-    for (int c = 0; c < COLS; c++) {
-        setColumnDriveMode(c, COLUMN_0_DM_DIG_HIZ);
-    }
-    for (int r = 0; r < ROWS; r++) {
-        for (int c = 0; c < COLS; c++) {
-            last_keys[r][c] = 1;
-        }
-    }
+// R,G,B: 0=ON, 1=OFF (active-low LED)
+static void rgb_set(uint8_t r, uint8_t g, uint8_t b) {
+    LED_R_Write(r);
+    LED_G_Write(g);
+    LED_B_Write(b);
 }
 
-static void readMatrix(void) {
+// ── Matrix ────────────────────────────────────────────────────────────────────
+
+static void matrix_init(void) {
+    for (int c = 0; c < COLS; c++)
+        col_drive(c, COLUMN_0_DM_DIG_HIZ);
+
+    for (int r = 0; r < ROWS; r++)
+        for (int c = 0; c < COLS; c++)
+            last_keys[r][c] = 1;
+}
+
+static void matrix_read(void) {
     for (int c = 0; c < COLS; c++) {
-        setColumnDriveMode(c, COLUMN_0_DM_STRONG);
-        setColumnWrite(c, 0);
-        for (int r = 0; r < ROWS; r++) {
-            keys[r][c] = readRow(r);
-        }
-        setColumnWrite(c, 1);
-        setColumnDriveMode(c, COLUMN_0_DM_DIG_HIZ);
+        col_drive(c, COLUMN_0_DM_STRONG);
+        col_write(c, 0);
+        for (int r = 0; r < ROWS; r++)
+            keys[r][c] = row_read(r);
+        col_write(c, 1);
+        col_drive(c, COLUMN_0_DM_DIG_HIZ);
     }
 }
 
@@ -128,67 +141,74 @@ static void readMatrix(void) {
 
 int main(void) {
     CyGlobalIntEnable;
-
     SW_Tx_UART_Start();
-    initMatrix();
+    matrix_init();
 
-    // Initial display: show '-' without dot
-    FourDigit74HC595_sendOneDigit(0, 10, 0);
+    // Boot: show '-', all LEDs off
+    display_show(0, 10, 0);
+    rgb_set(1, 1, 1);
 
-    SW_Tx_UART_PutString("System Ready. Scan 4x3 matrix...\r\n");
-    SW_Tx_UART_PutString("[*] = SHIFT: 1->E, 2->F (dot = shift active)\r\n");
+    SW_Tx_UART_PutString("=== Ready ===\r\n");
+    SW_Tx_UART_PutString("Keys: 1-9,0,A,b,C,d  |  [*]+[1]=E  [*]+[2]=F\r\n");
+    SW_Tx_UART_PutString("SHIFT is one-shot: auto-cancels after next key.\r\n\r\n");
 
     for (;;) {
-        readMatrix();
+        matrix_read();
 
         for (int r = 0; r < ROWS; r++) {
             for (int c = 0; c < COLS; c++) {
 
-                // ── Rising edge: key pressed ──────────────────────────────
+                // ── Key press (falling edge) ──────────────────────────────
                 if (keys[r][c] == 0 && last_keys[r][c] == 1) {
 
-                    // Shift key: row 3, col 0
+                    // SHIFT key: row 3, col 0
                     if (r == 3 && c == 0) {
-                        shift_mode ^= 1; // toggle
-
-                        // Відображаємо поточний символ з крапкою/без
-                        // (ми не знаємо, що було раніше, тому показуємо '-'
-                        //  зі станом shift як індикатор)
-                        FourDigit74HC595_sendOneDigit(0, 10, shift_mode);
-
-                        SW_Tx_UART_PutString("SHIFT ");
-                        SW_Tx_UART_PutString(shift_mode ? "ON\r\n" : "OFF\r\n");
-
-                        LED_R_Write(shift_mode ? 0 : 1); // синій = shift on
-                        LED_G_Write(1);
-                        LED_B_Write(shift_mode ? 1 : 0);
+                        if (shift_mode) {
+                            // Second press → cancel shift
+                            shift_mode = 0;
+                            display_show(0, last_symbol, 0); // restore, no dot
+                            rgb_set(1, 1, 1);
+                            SW_Tx_UART_PutString("[SHIFT] cancelled\r\n");
+                        } else {
+                            // Activate shift
+                            shift_mode = 1;
+                            display_show(0, last_symbol, 1); // same symbol + dot
+                            rgb_set(1, 1, 0);                // blue = shift
+                            SW_Tx_UART_PutString("[SHIFT] active → press 1=E or 2=F\r\n");
+                        }
 
                     } else {
-                        // Звичайна клавіша
+                        // Regular key
                         uint8_t val = shift_mode
                                     ? shift_key_map[r][c]
                                     : key_map[r][c];
 
-                        // Відображаємо з крапкою, якщо shift активний
-                        FourDigit74HC595_sendOneDigit(0, val, shift_mode);
+                        last_symbol = val;
+                        display_show(0, val, 0); // show symbol, no dot
 
-                        SW_Tx_UART_PutString("Key: 0x");
-                        SW_Tx_UART_PutHexInt(val);
-                        if (shift_mode) SW_Tx_UART_PutString(" [SHIFT]");
+                        SW_Tx_UART_PutString("Key: ");
+                        SW_Tx_UART_PutString(SYM_NAME[val]);
+                        if (shift_mode) SW_Tx_UART_PutString("  (via SHIFT)");
                         SW_Tx_UART_PutCRLF();
 
-                        LED_R_Write(0);
-                        LED_G_Write(0);
-                        LED_B_Write(0);
+                        // One-shot: auto-cancel shift
+                        if (shift_mode) {
+                            shift_mode = 0;
+                            rgb_set(0, 1, 1); // red flash = shift consumed
+                        } else {
+                            rgb_set(0, 0, 0); // white = key active
+                        }
                     }
                 }
 
-                // ── Falling edge: key released ────────────────────────────
+                // ── Key release (rising edge) ─────────────────────────────
                 if (keys[r][c] == 1 && last_keys[r][c] == 0) {
-                    if (!(r == 3 && c == 0)) { // не shift-клавіша
-                        LED_R_Write(1);
-                        LED_G_Write(1);
-                        LED_B_Write(1);
+                    if (!(r == 3 && c == 0)) {
+                        // Restore idle RGB: blue if shift still on, off otherwise
+                        if (shift_mode)
+                            rgb_set(1, 1, 0); // blue = shift still waiting
+                        else
+                            rgb_set(1, 1, 1); // all off
                     }
                 }
 
