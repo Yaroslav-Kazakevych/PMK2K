@@ -1,105 +1,90 @@
 #include "project.h"
 
-// Масив для семисегментного індикатора (Спільний анод)
-// 0-9, потім A, b, C, d, E, F
-uint8_t LED_NUM[] = {
-    0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90, // 0-9
-    0x88, 0x83, 0xC6, 0xA1, 0x86, 0x8E                          // A, b, C, d, E, F
+// 1. Таблиця відповідності двійкових кодів (Спільний анод)
+// Додано символи A, b, C, d, E, F (індекси 10-15)
+static uint8_t LED_NUM[] = {
+    0xC0, // 0
+    0xF9, // 1
+    0xA4, // 2
+    0xB0, // 3
+    0x99, // 4
+    0x92, // 5
+    0x82, // 6
+    0xF8, // 7
+    0x80, // 8
+    0x90, // 9
+    0x88, // A
+    0x83, // b
+    0xC6, // C
+    0xA1, // d
+    0x86, // E
+    0x8E, // F
+    0x7F  // . (крапка)
 };
 
-uint8_t keys[4][3];
-uint8_t last_button = 255;
-
-// Прототипи функцій
-void FourDigit74HC595_sendData(uint8_t data);
-void FourDigit74HC595_sendOneDigit(uint8_t position, uint8_t digit_index);
-void readMatrix(void);
-
-// Функція передачі байта
-void FourDigit74HC595_sendData(uint8_t data) {
-    for (uint8_t i = 0; i < 8; i++) {
-        if (data & (0x80 >> i)) Pin_DO_Write(1);
-        else Pin_DO_Write(0);
-        
+// 2. Функція відправки одного байту на зсувний регістр (Рис. 10)
+static void FourDigit74HC595_sendData(uint8_t data) {
+    for(uint8_t i = 0; i < 8; i++) {
+        // Виділяємо кожен біт, починаючи зі старшого (MSB)
+        if(data & (0x80 >> i)) {
+            Pin_DO_Write(1);
+        } else {
+            Pin_DO_Write(0);
+        }
+        // Тактовий імпульс
         Pin_CLK_Write(1);
         Pin_CLK_Write(0);
     }
 }
 
-// Функція виводу на розряд
-void FourDigit74HC595_sendOneDigit(uint8_t position, uint8_t digit_index) {
-    // Вибір позиції (розряду)
-    FourDigit74HC595_sendData(0xFF & ~(1 << position));
-    // Вивід коду символу
-    FourDigit74HC595_sendData(LED_NUM[digit_index]);
+// 3. Функція виводу одного символу на певну позицію (Рис. 11)
+static void FourDigit74HC595_sendOneDigit(uint8_t position, uint8_t digit, uint8_t dot) {
+    // Якщо позиція поза межами (4-розрядний дисплей), очищуємо
+    if(position >= 4) {
+        FourDigit74HC595_sendData(0xFF);
+        FourDigit74HC595_sendData(0xFF);
+    } else {
+        // Відправляємо маску позиції (який розряд увімкнути)
+        FourDigit74HC595_sendData(0xFF & ~(1 << position));
+        
+        // Відправляємо код символу з урахуванням крапки
+        if(dot) {
+            FourDigit74HC595_sendData(LED_NUM[digit] & 0x7F);
+        } else {
+            FourDigit74HC595_sendData(LED_NUM[digit]);
+        }
+    }
     
+    // Защіпка (Latch) для відображення даних
     Pin_Latch_Write(1);
     Pin_Latch_Write(0);
 }
 
-// Сканування матриці клавіатури 4х3
-void readMatrix(void) {
-    // Сканування колонки 0
-    COLUMN_0_SetDriveMode(COLUMN_0_DM_STRONG);
-    COLUMN_0_Write(0);
-    keys[0][0] = ROW_0_Read(); keys[1][0] = ROW_1_Read();
-    keys[2][0] = ROW_2_Read(); keys[3][0] = ROW_3_Read();
-    COLUMN_0_SetDriveMode(COLUMN_0_DM_DIG_HIZ);
-
-    // Сканування колонки 1
-    COLUMN_1_SetDriveMode(COLUMN_1_DM_STRONG);
-    COLUMN_1_Write(0);
-    keys[0][1] = ROW_0_Read(); keys[1][1] = ROW_1_Read();
-    keys[2][1] = ROW_2_Read(); keys[3][1] = ROW_3_Read();
-    COLUMN_1_SetDriveMode(COLUMN_1_DM_DIG_HIZ);
-
-    // Сканування колонки 2
-    COLUMN_2_SetDriveMode(COLUMN_2_DM_STRONG);
-    COLUMN_2_Write(0);
-    keys[0][2] = ROW_0_Read(); keys[1][2] = ROW_1_Read();
-    keys[2][2] = ROW_2_Read(); keys[3][2] = ROW_3_Read();
-    COLUMN_2_SetDriveMode(COLUMN_2_DM_DIG_HIZ);
+/* ПРИМІТКА: Функція сканування матричної клавіатури залежить від вашої схеми.
+   Нижче наведено приклад структури, яку вам потрібно адаптувати.
+*/
+uint8_t Get_Keypad_Number() {
+    // Тут має бути ваш код сканування рядків та стовпців.
+    // Наприклад, якщо натиснуто кнопку 'A', функція має повернути 10.
+    // Якщо нічого не натиснуто — 0xFF.
+    return 0xFF; 
 }
 
 int main(void) {
-    CyGlobalIntEnable;
+    CyGlobalIntEnable; /* Enable global interrupts. */
+
+    uint8_t current_key = 0xFF;
 
     for(;;) {
-        readMatrix();
+        // 1. Опитуємо клавіатуру
+        current_key = Get_Keypad_Number();
 
-        // Обробка натискання (приклад для кількох кнопок)
-        
-        // Кнопка '1'
-        if (keys[0][0] == 0 && last_button != 1) {
-            FourDigit74HC595_sendOneDigit(0, 1);
-            last_button = 1;
-        }
-        // Кнопка '2'
-        else if (keys[0][1] == 0 && last_button != 2) {
-            FourDigit74HC595_sendOneDigit(0, 2);
-            last_button = 2;
-        }
-        // Кнопка '*' (виводимо 'A' за методичкою)
-        else if (keys[3][0] == 0 && last_button != 10) {
-            FourDigit74HC595_sendOneDigit(0, 10); // 10-й індекс — це 'A'
-            last_button = 10;
-        }
-        // Кнопка '0'
-        else if (keys[3][1] == 0 && last_button != 0) {
-            FourDigit74HC595_sendOneDigit(0, 0);
-            last_button = 0;
-        }
-        // Кнопка '#' (виводимо 'b')
-        else if (keys[3][2] == 0 && last_button != 11) {
-            FourDigit74HC595_sendOneDigit(0, 11); // 11-й індекс — це 'b'
-            last_button = 11;
-        }
-
-        // Скидання стану, якщо кнопку відпущено
-        if (keys[0][0] && keys[0][1] && keys[3][0] && keys[3][1] && keys[3][2]) {
-            last_button = 255;
+        // 2. Якщо клавішу натиснуто (код від 0 до 15)
+        if (current_key <= 15) {
+            // Виводимо символ на 0-ву позицію дисплея
+            FourDigit74HC595_sendOneDigit(0, current_key, 0);
         }
         
-        CyDelay(10); 
+        CyDelay(10); // Затримка для запобігання дребезгу
     }
 }
