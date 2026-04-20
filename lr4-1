@@ -2,7 +2,7 @@
 
 // Розмірність матриці
 #define ROWS 4
-#define COLS 4
+#define COLS 3
 
 // Масив символів для 7-сегментного дисплея (спільний анод)
 static uint8_t LED_NUM[] = {
