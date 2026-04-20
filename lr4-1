@@ -1,9 +1,10 @@
 #include "project.h"
 
-// Змінюємо кількість колонок на 3, як у вашому залізі
+// Розмірність матриці
 #define ROWS 4
-#define COLS 3
+#define COLS 4
 
+// Масив символів для 7-сегментного дисплея (спільний анод)
 static uint8_t LED_NUM[] = {
     0xC0, // 0 (індекс 0)
     0xF9, // 1
@@ -25,20 +26,45 @@ static uint8_t LED_NUM[] = {
     0x7F  // . (індекс 17)
 };
 
-// Карта для 12 кнопок (4x3)
-// Натискання '*' (рядок 3, кол 0) виведе 'A' (індекс 11)
-// Натискання '#' (рядок 3, кол 2) виведе 'b' (індекс 12)
+// Карта клавіш: фізичне розташування кнопок відповідає індексам у LED_NUM
 static const uint8_t key_map[ROWS][COLS] = {
-    {1,  2,  3},  // Рядок 0
-    {4,  5,  6},  // Рядок 1
-    {7,  8,  9},  // Рядок 2
-    {11, 0,  12}  // Рядок 3: [11] це 'A', [0] це '0', [12] це 'b'
+    {1,  2,  3,  11}, // Рядок 0: 1, 2, 3, A
+    {4,  5,  6,  12}, // Рядок 1: 4, 5, 6, b
+    {7,  8,  9,  13}, // Рядок 2: 7, 8, 9, C
+    {14, 0,  15, 16}  // Рядок 3: d, 0, E, F
 };
 
-static uint8_t keys[ROWS][COLS];
-static uint8_t last_keys[ROWS][COLS];
+static uint8_t keys[ROWS][COLS];      // Поточний стан
+static uint8_t last_keys[ROWS][COLS]; // Попередній стан для відстеження натискання
 
-// --- Обгортки (видалено COLUMN_3) ---
+// --- Функції керування 74HC595 ---
+
+static void FourDigit74HC595_sendData(uint8_t data) {
+    for(uint8_t i = 0; i < 8; i++) {
+        Pin_DO_Write((data & (0x80 >> i)) ? 1 : 0);
+        Pin_CLK_Write(1);
+        Pin_CLK_Write(0);
+    }
+}
+
+static void FourDigit74HC595_sendOneDigit(uint8_t position, uint8_t digit_index, uint8_t dot) {
+    if(position >= 4) { // Очищення, якщо позиція поза межами
+        FourDigit74HC595_sendData(0xFF);
+        FourDigit74HC595_sendData(0xFF);
+        return;
+    }
+    // Вибір розряду (позиції)
+    FourDigit74HC595_sendData(0xFF & ~(1 << position));
+    // Вибір символу з масиву
+    uint8_t pattern = LED_NUM[digit_index];
+    if(dot) pattern &= 0x7F; // Увімкнути крапку, якщо потрібно
+    
+    FourDigit74HC595_sendData(pattern);
+    Pin_Latch_Write(1);
+    Pin_Latch_Write(0);
+}
+
+// --- Обгортки для роботи з пінами (усувають помилки "Statement with no effect") ---
 
 static void setColumnDriveMode(uint8_t col, uint8_t mode) {
     switch(col) {
@@ -66,74 +92,89 @@ static uint8_t readRow(uint8_t row) {
     }
 }
 
-// --- Робота з 74HC595 ---
-
-static void FourDigit74HC595_sendData(uint8_t data) {
-    for(uint8_t i = 0; i < 8; i++) {
-        Pin_DO_Write((data & (0x80 >> i)) ? 1 : 0);
-        Pin_CLK_Write(1);
-        Pin_CLK_Write(0);
-    }
-}
-
-static void FourDigit74HC595_sendOneDigit(uint8_t position, uint8_t digit_index, uint8_t dot) {
-    FourDigit74HC595_sendData(0xFF & ~(1 << position));
-    uint8_t pattern = LED_NUM[digit_index];
-    if(dot) pattern &= 0x7F;
-    
-    FourDigit74HC595_sendData(pattern);
-    Pin_Latch_Write(1);
-    Pin_Latch_Write(0);
-}
-
-// --- Основна логіка ---
+// --- Логіка матриці ---
 
 static void initMatrix() {
-    for(int c = 0; c < COLS; c++) setColumnDriveMode(c, COLUMN_0_DM_DIG_HIZ);
+    for(int c = 0; c < COLS; c++) {
+        setColumnDriveMode(c, COLUMN_0_DM_DIG_HIZ);
+    }
     for(int r = 0; r < ROWS; r++) {
-        for(int c = 0; c < COLS; c++) last_keys[r][c] = 1;
+        for(int c = 0; c < COLS; c++) {
+            last_keys[r][c] = 1; // 1 = відпущено
+        }
     }
 }
 
 static void readMatrix() {
     for(int c = 0; c < COLS; c++) {
         setColumnDriveMode(c, COLUMN_0_DM_STRONG);
-        setColumnWrite(c, 0);
-        for(int r = 0; r < ROWS; r++) keys[r][c] = readRow(r);
+        setColumnWrite(c, 0); // Подаємо нуль на колонку
+        
+        for(int r = 0; r < ROWS; r++) {
+            keys[r][c] = readRow(r); // Зчитуємо стан рядка
+        }
+        
         setColumnWrite(c, 1);
         setColumnDriveMode(c, COLUMN_0_DM_DIG_HIZ);
     }
 }
 
+void printMatrixDebug() {
+    SW_Tx_UART_PutString("\r\nMatrix state:\r\n");
+    for (int r = 0; r < ROWS; r++) {
+        for(int c = 0; c < COLS; c++) {
+            SW_Tx_UART_PutHexInt(keys[r][c]);
+            SW_Tx_UART_PutString(" ");
+        }
+        SW_Tx_UART_PutCRLF();
+    }
+}
+
+// --- Головна функція ---
+
 int main(void) {
     CyGlobalIntEnable;
+    
     SW_Tx_UART_Start();
     initMatrix();
     
-    FourDigit74HC595_sendOneDigit(0, 10, 0); // Початковий прочерк '-'
+    // Початкове відображення (наприклад, прочерк)
+    FourDigit74HC595_sendOneDigit(0, 10, 0); 
+    
+    SW_Tx_UART_PutString("System Ready. Scan 4x4 matrix...\r\n");
 
     for(;;) {
         readMatrix();
+        
         for(int r = 0; r < ROWS; r++) {
             for(int c = 0; c < COLS; c++) {
-                // Натискання
+                
+                // Перевірка на НАТИСКАННЯ (було 1, стало 0)
                 if(keys[r][c] == 0 && last_keys[r][c] == 1) {
                     uint8_t val = key_map[r][c];
+                    
                     FourDigit74HC595_sendOneDigit(0, val, 0);
                     
-                    LED_R_Write(0); LED_G_Write(0); LED_B_Write(0);
-                    
-                    SW_Tx_UART_PutString("Pressed key index: ");
+                    SW_Tx_UART_PutString("Key Pressed: ");
                     SW_Tx_UART_PutHexInt(val);
-                    SW_Tx_UART_PutString("\r\n");
+                    SW_Tx_UART_PutCRLF();
+                    
+                    LED_R_Write(0); // Візуальна індикація натискання (RGB ON)
+                    LED_G_Write(0);
+                    LED_B_Write(0);
                 }
-                // Відпускання
+                
+                // Перевірка на ВІДПУСКАННЯ (було 0, стало 1)
                 if(keys[r][c] == 1 && last_keys[r][c] == 0) {
-                    LED_R_Write(1); LED_G_Write(1); LED_B_Write(1);
+                    LED_R_Write(1); // RGB OFF
+                    LED_G_Write(1);
+                    LED_B_Write(1);
                 }
-                last_keys[r][c] = keys[r][c];
+                
+                last_keys[r][c] = keys[r][c]; // Оновлення стану
             }
         }
-        CyDelay(20);
+        
+        CyDelay(20); // Антибрязкіт
     }
 }
