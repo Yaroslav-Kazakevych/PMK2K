@@ -1,125 +1,128 @@
 #include "project.h"
 
-// Розмір матриці клавіатури (4x4 для підтримки 16 символів: 0-9 та A-F)
+// Розмірність матриці
 #define ROWS 4
 #define COLS 4
 
+// Масив символів для 7-сегментного дисплея (спільний анод)
 static uint8_t LED_NUM[] = {
-    0xC0, // 0  (індекс 0)
-    0xF9, // 1  (індекс 1)
-    0xA4, // 2  (індекс 2)
-    0xB0, // 3  (індекс 3)
-    0x99, // 4  (індекс 4)
-    0x92, // 5  (індекс 5)
-    0x82, // 6  (індекс 6)
-    0xF8, // 7  (індекс 7)
-    0x80, // 8  (індекс 8)
-    0x90, // 9  (індекс 9)
-    0xBF, // -  (індекс 10)
-    0x88, // A  (індекс 11)
-    0x83, // b  (індекс 12)
-    0xC6, // C  (індекс 13)
-    0xA1, // d  (індекс 14)
-    0x86, // E  (індекс 15)
-    0x8E, // F  (індекс 16)
-    0x7F  // .  (індекс 17)
+    0xC0, // 0 (індекс 0)
+    0xF9, // 1
+    0xA4, // 2
+    0xB0, // 3
+    0x99, // 4
+    0x92, // 5
+    0x82, // 6
+    0xF8, // 7
+    0x80, // 8
+    0x90, // 9 (індекс 9)
+    0xBF, // - (індекс 10)
+    0x88, // A (індекс 11)
+    0x83, // b (індекс 12)
+    0xC6, // C (індекс 13)
+    0xA1, // d (індекс 14)
+    0x86, // E (індекс 15)
+    0x8E, // F (індекс 16)
+    0x7F  // . (індекс 17)
 };
 
-// Карта кнопок: зіставляє фізичну кнопку з індексом масиву LED_NUM
+// Карта клавіш: фізичне розташування кнопок відповідає індексам у LED_NUM
 static const uint8_t key_map[ROWS][COLS] = {
-    {1,  2,  3,  11}, // 1, 2, 3, A
-    {4,  5,  6,  12}, // 4, 5, 6, b
-    {7,  8,  9,  13}, // 7, 8, 9, C
-    {14, 0,  15, 16}  // d, 0, E, F (замість *, 0, #, D)
+    {1,  2,  3,  11}, // Рядок 0: 1, 2, 3, A
+    {4,  5,  6,  12}, // Рядок 1: 4, 5, 6, b
+    {7,  8,  9,  13}, // Рядок 2: 7, 8, 9, C
+    {14, 0,  15, 16}  // Рядок 3: d, 0, E, F
 };
 
-// Масиви для збереження поточного та попереднього станів кнопок (0 - натиснута, 1 - відпущена)
-static uint8_t keys[ROWS][COLS];
-static uint8_t last_keys[ROWS][COLS];
+static uint8_t keys[ROWS][COLS];      // Поточний стан
+static uint8_t last_keys[ROWS][COLS]; // Попередній стан для відстеження натискання
 
-/* send data function */
+// --- Функції керування 74HC595 ---
+
 static void FourDigit74HC595_sendData(uint8_t data) {
     for(uint8_t i = 0; i < 8; i++) {
-        if(data & (0x80 >> i)) {
-            Pin_DO_Write(1);
-        } else {
-            Pin_DO_Write(0);
-        }
+        Pin_DO_Write((data & (0x80 >> i)) ? 1 : 0);
         Pin_CLK_Write(1);
         Pin_CLK_Write(0);
     }
 }
 
-/* send one digit function */
-static void FourDigit74HC595_sendOneDigit(uint8_t position, uint8_t digit, uint8_t dot) {
-    if(position >= 8) { // out of range, clear 7-segment display
+static void FourDigit74HC595_sendOneDigit(uint8_t position, uint8_t digit_index, uint8_t dot) {
+    if(position >= 4) { // Очищення, якщо позиція поза межами
         FourDigit74HC595_sendData(0xFF);
         FourDigit74HC595_sendData(0xFF);
+        return;
     }
+    // Вибір розряду (позиції)
     FourDigit74HC595_sendData(0xFF & ~(1 << position));
+    // Вибір символу з масиву
+    uint8_t pattern = LED_NUM[digit_index];
+    if(dot) pattern &= 0x7F; // Увімкнути крапку, якщо потрібно
     
-    if(dot) {
-        FourDigit74HC595_sendData(LED_NUM[digit] & 0x7F);
-    } else {
-        FourDigit74HC595_sendData(LED_NUM[digit]);
-    }
-    Pin_Latch_Write(1); // Latch shift register
+    FourDigit74HC595_sendData(pattern);
+    Pin_Latch_Write(1);
     Pin_Latch_Write(0);
 }
 
-/* pointers to functions */
-static void (*COLUMN_x_SetDriveMode[COLS])(uint8_t mode) = {
-    COLUMN_0_SetDriveMode,
-    COLUMN_1_SetDriveMode,
-    COLUMN_2_SetDriveMode,
-    COLUMN_3_SetDriveMode // Увага: додано 4-ту колонку для матриці 4x4
-};
+// --- Обгортки для роботи з пінами (усувають помилки "Statement with no effect") ---
 
-static void (*COLUMN_x_Write[COLS])(uint8_t value) = {
-    COLUMN_0_Write,
-    COLUMN_1_Write,
-    COLUMN_2_Write,
-    COLUMN_3_Write // Увага: додано 4-ту колонку
-};
+static void setColumnDriveMode(uint8_t col, uint8_t mode) {
+    switch(col) {
+        case 0: COLUMN_0_SetDriveMode(mode); break;
+        case 1: COLUMN_1_SetDriveMode(mode); break;
+        case 2: COLUMN_2_SetDriveMode(mode); break;
+        case 3: COLUMN_3_SetDriveMode(mode); break;
+    }
+}
 
-static uint8 (*ROW_x_Read[ROWS])() = {
-    ROW_0_Read,
-    ROW_1_Read,
-    ROW_2_Read,
-    ROW_3_Read
-};
+static void setColumnWrite(uint8_t col, uint8_t value) {
+    switch(col) {
+        case 0: COLUMN_0_Write(value); break;
+        case 1: COLUMN_1_Write(value); break;
+        case 2: COLUMN_2_Write(value); break;
+        case 3: COLUMN_3_Write(value); break;
+    }
+}
 
-/* matrix initialization function */
+static uint8_t readRow(uint8_t row) {
+    switch(row) {
+        case 0: return ROW_0_Read();
+        case 1: return ROW_1_Read();
+        case 2: return ROW_2_Read();
+        case 3: return ROW_3_Read();
+        default: return 1;
+    }
+}
+
+// --- Логіка матриці ---
+
 static void initMatrix() {
     for(int c = 0; c < COLS; c++) {
-        COLUMN_x_SetDriveMode[c](COLUMN_0_DM_DIG_HIZ);
+        setColumnDriveMode(c, COLUMN_0_DM_DIG_HIZ);
     }
-    
-    // Ініціалізація попередніх станів кнопок (1 = відпущені)
     for(int r = 0; r < ROWS; r++) {
         for(int c = 0; c < COLS; c++) {
-            last_keys[r][c] = 1; 
+            last_keys[r][c] = 1; // 1 = відпущено
         }
     }
 }
 
-/* keys matrix read function */
 static void readMatrix() {
     for(int c = 0; c < COLS; c++) {
-        COLUMN_x_SetDriveMode[c](COLUMN_0_DM_STRONG);
-        COLUMN_x_Write[c](0);
+        setColumnDriveMode(c, COLUMN_0_DM_STRONG);
+        setColumnWrite(c, 0); // Подаємо нуль на колонку
         
         for(int r = 0; r < ROWS; r++) {
-            keys[r][c] = ROW_x_Read[r]();
+            keys[r][c] = readRow(r); // Зчитуємо стан рядка
         }
         
-        COLUMN_x_SetDriveMode[c](COLUMN_0_DM_DIG_HIZ);
+        setColumnWrite(c, 1);
+        setColumnDriveMode(c, COLUMN_0_DM_DIG_HIZ);
     }
 }
 
-/* matrix print function */
-void printMatrix() {
-    SW_Tx_UART_PutCRLF();
+void printMatrixDebug() {
+    SW_Tx_UART_PutString("\r\nMatrix state:\r\n");
     for (int r = 0; r < ROWS; r++) {
         for(int c = 0; c < COLS; c++) {
             SW_Tx_UART_PutHexInt(keys[r][c]);
@@ -127,61 +130,53 @@ void printMatrix() {
         }
         SW_Tx_UART_PutCRLF();
     }
-    SW_Tx_UART_PutCRLF();
 }
 
+// --- Головна функція ---
+
 int main(void) {
-    CyGlobalIntEnable; /* Enable global interrupts. */
+    CyGlobalIntEnable;
     
     SW_Tx_UART_Start();
-    SW_Tx_UART_PutCRLF();
-    SW_Tx_UART_PutString("System Started");
-    SW_Tx_UART_PutCRLF();
-    
     initMatrix();
     
+    // Початкове відображення (наприклад, прочерк)
+    FourDigit74HC595_sendOneDigit(0, 10, 0); 
+    
+    SW_Tx_UART_PutString("System Ready. Scan 4x4 matrix...\r\n");
+
     for(;;) {
         readMatrix();
         
-        // Цикл перевірки всіх кнопок замість десятків if-блоків
         for(int r = 0; r < ROWS; r++) {
             for(int c = 0; c < COLS; c++) {
                 
-                // Якщо кнопку щойно НАТИСНУЛИ
+                // Перевірка на НАТИСКАННЯ (було 1, стало 0)
                 if(keys[r][c] == 0 && last_keys[r][c] == 1) {
-                    uint8_t digit_index = key_map[r][c]; // Отримуємо індекс з карти
+                    uint8_t val = key_map[r][c];
                     
-                    // Виводимо на 7-сегментний дисплей
-                    FourDigit74HC595_sendOneDigit(0, digit_index, 0);
+                    FourDigit74HC595_sendOneDigit(0, val, 0);
                     
-                    // Вивід в UART
-                    SW_Tx_UART_PutString("Button ");
-                    SW_Tx_UART_PutHexInt(digit_index); // Виведе індекс (напр. 0B для 'A')
-                    SW_Tx_UART_PutString(" pressed\r\n");
+                    SW_Tx_UART_PutString("Key Pressed: ");
+                    SW_Tx_UART_PutHexInt(val);
+                    SW_Tx_UART_PutCRLF();
                     
-                    // Вмикаємо RGB світлодіод
-                    LED_R_Write(0);
+                    LED_R_Write(0); // Візуальна індикація натискання (RGB ON)
                     LED_G_Write(0);
                     LED_B_Write(0);
-                    
-                    printMatrix();
                 }
                 
-                // Якщо кнопку щойно ВІДПУСТИЛИ
-                else if(keys[r][c] == 1 && last_keys[r][c] == 0) {
-                    SW_Tx_UART_PutString("Button released\r\n");
-                    
-                    // Вимикаємо RGB світлодіод
-                    LED_R_Write(1);
+                // Перевірка на ВІДПУСКАННЯ (було 0, стало 1)
+                if(keys[r][c] == 1 && last_keys[r][c] == 0) {
+                    LED_R_Write(1); // RGB OFF
                     LED_G_Write(1);
                     LED_B_Write(1);
                 }
                 
-                // Оновлюємо попередній стан
-                last_keys[r][c] = keys[r][c];
+                last_keys[r][c] = keys[r][c]; // Оновлення стану
             }
         }
         
-        CyDelay(10); // Невеликий delay для антибрязкоту контактів (debounce)
+        CyDelay(20); // Антибрязкіт
     }
 }
