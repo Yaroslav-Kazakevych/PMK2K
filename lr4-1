@@ -1,10 +1,10 @@
 #include "project.h"
 
-// Розмірність матриці тепер 4x4
+// --- Розмірність матриці за фото: 4 рядки x 3 стовпці ---
 #define ROWS 4
-#define COLS 4
+#define COLS 3
 
-// Масив символів для 7-сегментного дисплея (спільний анод)
+// Масив символів для 7-сегментного дисплея (спільний анод) - БЕЗ ЗМІН
 static uint8_t LED_NUM[] = {
     0xC0, // 0 (індекс 0)
     0xF9, // 1
@@ -26,18 +26,21 @@ static uint8_t LED_NUM[] = {
     0x7F  // . (індекс 17)
 };
 
-// Карта клавіш 4x4: цифри та літери A-F
+// --- ОНОВЛЕНА КАРТА КЛАВІШ 4x3 ---
+// Кнопка '3' -> 'A' (11), '6' -> 'b' (12), '9' -> 'C' (13), '#' -> 'd' (14)
+// Символи '*' та '#' не мають масок в LED_NUM, тому ми призначаємо їм 10 (-) та d.
+// Кнопки E (15) та F (16) недоступні з клавіатури, але є в LED_NUM.
 static const uint8_t key_map[ROWS][COLS] = {
-    {1,  2,  3,  11}, // 1, 2, 3, A (11 - індекс 'A' в LED_NUM)
-    {4,  5,  6,  12}, // 4, 5, 6, b (12 - індекс 'b')
-    {7,  8,  9,  13}, // 7, 8, 9, C (13 - індекс 'C')
-    {14, 0,  15, 16}  // d, 0, E, F (14-'d', 15-'E', 16-'F')
+    {1,  2,  11}, // Рядок 0 (P3.6): 1, 2, A (кнопка '3')
+    {4,  5,  12}, // Рядок 1 (P1.6): 4, 5, b (кнопка '6')
+    {7,  8,  13}, // Рядок 2 (P3.5): 7, 8, C (кнопка '9')
+    {10, 0,  14}  // Рядок 3 (P1.7): - (*), 0, d (#)
 };
 
-static uint8_t keys[ROWS][COLS];      
-static uint8_t last_keys[ROWS][COLS]; 
+static uint8_t keys[ROWS][COLS];      // Поточний стан
+static uint8_t last_keys[ROWS][COLS]; // Попередній стан
 
-// --- Керування 74HC595 ---
+// --- Функції керування 74HC595 - БЕЗ ЗМІН ---
 static void FourDigit74HC595_sendData(uint8_t data) {
     for(uint8_t i = 0; i < 8; i++) {
         Pin_DO_Write((data & (0x80 >> i)) ? 1 : 0);
@@ -47,8 +50,11 @@ static void FourDigit74HC595_sendData(uint8_t data) {
 }
 
 static void FourDigit74HC595_sendOneDigit(uint8_t position, uint8_t digit_index, uint8_t dot) {
-    if(position >= 4) return;
-    
+    if(position >= 4) {
+        FourDigit74HC595_sendData(0xFF);
+        FourDigit74HC595_sendData(0xFF);
+        return;
+    }
     FourDigit74HC595_sendData(0xFF & ~(1 << position));
     uint8_t pattern = LED_NUM[digit_index];
     if(dot) pattern &= 0x7F; 
@@ -58,36 +64,39 @@ static void FourDigit74HC595_sendOneDigit(uint8_t position, uint8_t digit_index,
     Pin_Latch_Write(0);
 }
 
-// --- Обгортки для пінів (Додано COLUMN_3) ---
+// --- ОНОВЛЕНІ ОБГОРТКИ ДЛЯ ПІНІВ (ЗА ФОТО) ---
+
 static void setColumnDriveMode(uint8_t col, uint8_t mode) {
     switch(col) {
-        case 0: COLUMN_0_SetDriveMode(mode); break;
-        case 1: COLUMN_1_SetDriveMode(mode); break;
-        case 2: COLUMN_2_SetDriveMode(mode); break;
-        case 3: COLUMN_3_SetDriveMode(mode); break; // Додано для 4-ї колонки
+        // УВАГА: Оновіть TopDesign, щоб ці імена відповідали правильним пінам!
+        case 0: COLUMN_0_SetDriveMode(mode); break; // Фізично стовпець 1 -> P2.2 (C0)
+        case 1: COLUMN_1_SetDriveMode(mode); break; // Фізично стовпець 2 -> P2.1 (C1)
+        case 2: COLUMN_2_SetDriveMode(mode); break; // Фізично стовпець 3 -> P2.0 (C2)
     }
 }
 
 static void setColumnWrite(uint8_t col, uint8_t value) {
     switch(col) {
-        case 0: COLUMN_0_Write(value); break;
-        case 1: COLUMN_1_Write(value); break;
-        case 2: COLUMN_2_Write(value); break;
-        case 3: COLUMN_3_Write(value); break; // Додано для 4-ї колонки
+        // УВАГА: Оновіть TopDesign, щоб ці імена відповідали правильним пінам!
+        case 0: COLUMN_0_Write(value); break; // Фізично стовпець 1 -> P2.2 (C0)
+        case 1: COLUMN_1_Write(value); break; // Фізично стовпець 2 -> P2.1 (C1)
+        case 2: COLUMN_2_Write(value); break; // Фізично стовпець 3 -> P2.0 (C2)
     }
 }
 
 static uint8_t readRow(uint8_t row) {
     switch(row) {
-        case 0: return ROW_0_Read();
-        case 1: return ROW_1_Read();
-        case 2: return ROW_2_Read();
-        case 3: return ROW_3_Read();
+        // УВАГА: Оновіть TopDesign, щоб ці імена відповідали правильним пінам!
+        case 0: return ROW_0_Read(); // Фізично рядок 1 -> P3.6 (R0/R14)
+        case 1: return ROW_1_Read(); // Фізично рядок 2 -> P1.6 (R1/R18)
+        case 2: return ROW_2_Read(); // Фізично рядок 3 -> P3.5 (R2/R19)
+        case 3: return ROW_3_Read(); // Фізично рядок 4 -> P1.7 (R3/R20)
         default: return 1;
     }
 }
 
-// --- Логіка матриці ---
+// --- Логіка матриці - БЕЗ ЗМІН ---
+
 static void initMatrix() {
     for(int c = 0; c < COLS; c++) {
         setColumnDriveMode(c, COLUMN_0_DM_DIG_HIZ);
@@ -113,27 +122,30 @@ static void readMatrix() {
     }
 }
 
+// --- Головна функція - БЕЗ ЗМІН ---
+
 int main(void) {
     CyGlobalIntEnable;
+    
     SW_Tx_UART_Start();
     initMatrix();
     
-    FourDigit74HC595_sendOneDigit(0, 10, 0); // Прочерк при старті
+    FourDigit74HC595_sendOneDigit(0, 10, 0); 
     
+    SW_Tx_UART_PutString("System Ready. Scan 4x3 matrix...\r\n");
+
     for(;;) {
         readMatrix();
         
         for(int r = 0; r < ROWS; r++) {
             for(int c = 0; c < COLS; c++) {
                 
-                // Обробка натискання
                 if(keys[r][c] == 0 && last_keys[r][c] == 1) {
-                    uint8_t val = key_map[r][c]; // Отримуємо індекс з мапи (0-16)
+                    uint8_t val = key_map[r][c];
                     
-                    // Відображаємо символ (включаючи A-F)
                     FourDigit74HC595_sendOneDigit(0, val, 0);
                     
-                    SW_Tx_UART_PutString("Key: ");
+                    SW_Tx_UART_PutString("Key Pressed: ");
                     SW_Tx_UART_PutHexInt(val);
                     SW_Tx_UART_PutCRLF();
                     
@@ -147,6 +159,7 @@ int main(void) {
                     LED_G_Write(1);
                     LED_B_Write(1);
                 }
+                
                 last_keys[r][c] = keys[r][c]; 
             }
         }
