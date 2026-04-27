@@ -44,7 +44,7 @@ volatile uint8_t flag_500ms = 0;
 
 // Стани системи
 typedef enum {
-    ST_IDLE,       // Відображає розраховане число (36)
+    ST_IDLE,       // Відображає розраховане число (29)
     ST_PASS_INPUT, // Введення пароля
     ST_PASS_RESULT,// Блимання результату пароля
     ST_RUNNING     // Таймер 5 хв + рухомий рядок
@@ -71,7 +71,6 @@ static void HC595_sendByte(uint8_t data) {
 }
 
 // ── ОБРОБНИК ПЕРЕРИВАННЯ ТАЙМЕРА (1 мс) ───────────────────────────────────────
-[span_7](start_span)// Обробник має виконуватися максимально швидко[span_7](end_span)
 CY_ISR(Timer_Int_Handler2) {
     static uint8_t curr_dig = 0;
     
@@ -80,7 +79,7 @@ CY_ISR(Timer_Int_Handler2) {
     HC595_sendByte(BLANK);
     Pin_Latch_Write(1); Pin_Latch_Write(0);
 
-    [span_8](start_span)// Згідно схеми: перші 8 біт - аноди, наступні - сегменти[span_8](end_span)
+    // Згідно схеми: перші 8 біт - аноди, наступні - сегменти
     uint8_t anode_mask = 0xFF & ~(1u << curr_dig);
     HC595_sendByte(anode_mask);
     HC595_sendByte(disp_buf[curr_dig]);
@@ -99,7 +98,7 @@ CY_ISR(Timer_Int_Handler2) {
         flag_1sec = 1;
     }
     
-    Timer_ReadStatusRegister(); [span_9](start_span)// Очищення прапорця переривання[span_9](end_span)
+    Timer_ReadStatusRegister(); // Очищення прапорця переривання
 }
 
 // ── Допоміжні функції ─────────────────────────────────────────────────────────
@@ -130,20 +129,20 @@ int main(void) {
     SW_Tx_UART_Start();
     matrix_init();
     
-    [span_10](start_span)// Ініціалізація таймера та переривань[span_10](end_span)
+    // Ініціалізація таймера та переривань
     Timer_Start();
     Timer_Int_StartEx(Timer_Int_Handler2);
 
-    [span_11](start_span)// Завдання 1: Число = 12 (варіант) + 24 (рік) = 36[span_11](end_span)
-    disp_buf[6] = LED_NUM[3];
-    disp_buf[7] = LED_NUM[6];
+    // Встановлюємо початкове число 29 (5 + 24)
+    disp_buf[6] = LED_NUM[2];
+    disp_buf[7] = LED_NUM[9];
 
-    SW_Tx_UART_PutString("=== Lab 5 Ready ===\r\nPress '#' (0xFF key) to enter password.\r\n");
+    SW_Tx_UART_PutString("=== Lab 5 Ready (Variant 5) ===\r\nPress '#' (0xFF key) to enter password.\r\n");
 
     uint8_t blink_count = 0;
     uint8_t pass_is_correct = 0;
     
-    [span_12](start_span)// Для рухомого рядка (Справа - наліво)[span_12](end_span)
+    // Для рухомого рядка (Наступні вправо)
     const uint8_t scroll_text[] = {LED_NUM[11], LED_NUM[12], LED_NUM[13], LED_NUM[14], BLANK, BLANK};
     uint8_t scroll_pos = 0;
 
@@ -156,20 +155,20 @@ int main(void) {
                 if (keys[r][c] == 0 && last_keys[r][c] == 1) {
                     uint8_t val = num_map[r][c];
 
-                    [span_13](start_span)// Якщо натиснуто "#" (старт вводу пароля)[span_13](end_span)
+                    // Якщо натиснуто "#" (старт вводу пароля)
                     if (val == 0xFF && current_state != ST_PASS_INPUT) {
                         current_state = ST_PASS_INPUT;
                         pass_idx = 0;
-                        for(int i=0; i<8; i++) disp_buf[i] = BLANK; // Очищення дисплею
+                        for(int i=0; i<8; i++) disp_buf[i] = BLANK; 
                         SW_Tx_UART_PutString("Enter Password:\r\n");
                     }
                     // Якщо вводимо пароль
                     else if (current_state == ST_PASS_INPUT && val < 10) {
                         pass_input[pass_idx] = val;
-                        disp_buf[4 + pass_idx] = LED_NUM[val]; // Відображаємо введене
+                        disp_buf[4 + pass_idx] = LED_NUM[val]; 
                         pass_idx++;
                         
-                        [span_14](start_span)if (pass_idx >= 4) { // Перевірка пароля[span_14](end_span)
+                        if (pass_idx >= 4) { // Перевірка пароля
                             pass_is_correct = 1;
                             for(int i=0; i<4; i++) {
                                 if(pass_input[i] != pass_correct[i]) pass_is_correct = 0;
@@ -185,42 +184,44 @@ int main(void) {
 
         // --- Обробка станів за таймером ---
         
-        [span_15](start_span)// Індикація перевірки пароля[span_15](end_span)
+        // Індикація перевірки пароля
         if (current_state == ST_PASS_RESULT && flag_500ms) {
             flag_500ms = 0;
             if (blink_count % 2 == 0) {
                 for(int i=0; i<8; i++) 
-                    disp_buf[i] = pass_is_correct ? LED_NUM[1] : LED_NUM[0]; // 11111111 або 00000000
+                    disp_buf[i] = pass_is_correct ? LED_NUM[1] : LED_NUM[0]; 
             } else {
                 for(int i=0; i<8; i++) disp_buf[i] = BLANK;
             }
             blink_count++;
             
-            if (blink_count > 6) { // Завершили блимання
+            if (blink_count > 6) { 
                 if (pass_is_correct) {
-                    current_state = ST_RUNNING; // Запуск завдання з таймером і рухомим рядком
+                    current_state = ST_RUNNING; 
                     t_min = 5; t_sec = 0;
                 } else {
-                    current_state = ST_IDLE; // Повернення до показу числа
+                    current_state = ST_IDLE; 
                     for(int i=0; i<8; i++) disp_buf[i] = BLANK;
-                    disp_buf[6] = LED_NUM[3];
-                    disp_buf[7] = LED_NUM[6];
+                    disp_buf[6] = LED_NUM[2];
+                    disp_buf[7] = LED_NUM[9];
                 }
             }
         }
 
-        [span_16](start_span)[span_17](start_span)// Основний режим виконання завдання (5 хв таймер + рухомий рядок)[span_16](end_span)[span_17](end_span)
+        // Основний режим виконання завдання (5 хв таймер + рухомий рядок вправо)
         if (current_state == ST_RUNNING) {
-            [span_18](start_span)// Рухомий рядок (Справа - наліво на 4-х правих індикаторах)[span_18](end_span)
+            
+            // Рухомий рядок (Варіант 5: 4 праві індикатори, рух ВПРАВО)
             if (flag_500ms) {
                 flag_500ms = 0;
                 scroll_pos = (scroll_pos + 1) % 6;
                 for(int i=0; i<4; i++) {
-                    disp_buf[4 + i] = scroll_text[(scroll_pos + i) % 6];
+                    // Щоб текст рухався вправо, індекс елемента має зменшуватися відносно позиції
+                    disp_buf[4 + i] = scroll_text[(6 + i - scroll_pos) % 6];
                 }
             }
             
-            [span_19](start_span)// Відлік 5 хвилин на 4-х лівих індикаторах[span_19](end_span)
+            // Відлік 5 хвилин на 4-х лівих індикаторах (фіксовані позиції)
             if (flag_1sec) {
                 flag_1sec = 0;
                 if (t_sec == 0) {
@@ -230,17 +231,16 @@ int main(void) {
                 }
                 
                 // Вивід часу: [ Х ] [ Х. ] [ Х ] [ Х ]
-                disp_buf[0] = LED_NUM[0]; // Провідний нуль хвилин
-                disp_buf[1] = LED_NUM[t_min] & 0x7F; // Додаємо крапку для розділення
+                disp_buf[0] = LED_NUM[0]; 
+                disp_buf[1] = LED_NUM[t_min] & 0x7F; // Крапка для розділення
                 disp_buf[2] = LED_NUM[t_sec / 10];
                 disp_buf[3] = LED_NUM[t_sec % 10];
             }
         } else {
-            // Скидаємо прапорці, якщо ми не в активному стані
             flag_1sec = 0; 
             flag_500ms = 0;
         }
 
-        CyDelay(5); // Невелика затримка для антибрязкоту кнопок
+        CyDelay(5);
     }
 }
