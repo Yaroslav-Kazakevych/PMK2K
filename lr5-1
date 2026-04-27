@@ -32,11 +32,8 @@ int8_t t_min = 5, t_sec = 0;
 uint8_t pass_input[4], pass_idx = 0;
 const uint8_t pass_correct[4] = {1, 2, 3, 4}; 
 
-// Прототип переривання
-CY_ISR_PROTO(Timer_Int_Handler2);
-
-// --- 74HC595 ---
-static void HC595_sendByte(uint8_t data) {
+// --- Функція відправки на регістр ---
+void HC595_sendByte(uint8_t data) {
     for (uint8_t i = 0; i < 8; i++) {
         Pin_DO_Write((data & (0x80 >> i)) ? 1 : 0);
         Pin_CLK_Write(1);
@@ -44,14 +41,17 @@ static void HC595_sendByte(uint8_t data) {
     }
 }
 
-// --- Переривання (Динамічна індикація) ---
-CY_ISR(Timer_Int_Handler2) {
+// --- ОБРОБНИК ПЕРЕРИВАННЯ (Динамічна індикація) ---
+// ВАЖЛИВО: Назва в Timer_Int_StartEx має збігатися з цією назвою
+CY_ISR(My_Timer_Int_Handler) {
     static uint8_t curr_dig = 0;
     
+    // Очищення для запобігання накладанню
     HC595_sendByte(0xFF); 
     HC595_sendByte(BLANK);
     Pin_Latch_Write(1); Pin_Latch_Write(0);
 
+    // Вивід поточного розряду
     uint8_t anode_mask = 0xFF & ~(1u << curr_dig);
     HC595_sendByte(anode_mask);
     HC595_sendByte(disp_buf[curr_dig]);
@@ -60,6 +60,7 @@ CY_ISR(Timer_Int_Handler2) {
 
     if (++curr_dig >= 8) curr_dig = 0;
 
+    // Таймінги
     ms_count++;
     if (ms_count % 500 == 0) flag_500ms = 1;
     if (ms_count >= 1000) { ms_count = 0; flag_1sec = 1; }
@@ -67,19 +68,19 @@ CY_ISR(Timer_Int_Handler2) {
     Timer_ReadStatusRegister(); 
 }
 
-// --- Керування колонками (Виправлено помилку Drive Mode) ---
-static void set_cols_hiz(void) {
-    COLUMN_0_SetDriveMode(COLUMN_0_DM_DIG_HIZ);
-    COLUMN_1_SetDriveMode(COLUMN_1_DM_DIG_HIZ);
-    COLUMN_2_SetDriveMode(COLUMN_2_DM_DIG_HIZ);
+// --- Матриця (фікс Drive Mode) ---
+void set_cols_hiz(void) {
+    COLUMN_0_SetDriveMode(PIN_DM_DIG_HIZ);
+    COLUMN_1_SetDriveMode(PIN_DM_DIG_HIZ);
+    COLUMN_2_SetDriveMode(PIN_DM_DIG_HIZ);
 }
 
-static void matrix_read(void) {
+void matrix_read(void) {
     for (int c = 0; c < COLS; c++) {
         set_cols_hiz();
-        if (c == 0) { COLUMN_0_SetDriveMode(COLUMN_0_DM_STRONG); COLUMN_0_Write(0); }
-        else if (c == 1) { COLUMN_1_SetDriveMode(COLUMN_1_DM_STRONG); COLUMN_1_Write(0); }
-        else { COLUMN_2_SetDriveMode(COLUMN_2_DM_STRONG); COLUMN_2_Write(0); }
+        if (c == 0) { COLUMN_0_SetDriveMode(PIN_DM_STRONG); COLUMN_0_Write(0); }
+        else if (c == 1) { COLUMN_1_SetDriveMode(PIN_DM_STRONG); COLUMN_1_Write(0); }
+        else { COLUMN_2_SetDriveMode(PIN_DM_STRONG); COLUMN_2_Write(0); }
         
         keys[0][c] = ROW_0_Read();
         keys[1][c] = ROW_1_Read();
@@ -88,27 +89,27 @@ static void matrix_read(void) {
         
         if (c == 0) COLUMN_0_Write(1); else if (c == 1) COLUMN_1_Write(1); else COLUMN_2_Write(1);
     }
-    set_cols_hiz();
 }
 
 int main(void) {
     CyGlobalIntEnable;
-    SW_Tx_UART_Start();
     
-    // Ініціалізація матриці
+    // Початковий стан заліза
     set_cols_hiz();
     for (int r = 0; r < ROWS; r++)
         for (int c = 0; c < COLS; c++) last_keys[r][c] = 1;
 
+    // Запуск таймера та переривання
     Timer_Start();
-    Timer_Int_StartEx(Timer_Int_Handler2);
+    Timer_Int_StartEx(My_Timer_Int_Handler); 
 
-    // Варіант 5: 5+24 = 29
+    // Стартове число для 5 варіанту (5 + 24 = 29)
     disp_buf[6] = LED_NUM[2];
     disp_buf[7] = LED_NUM[9];
 
     uint8_t blink_count = 0, pass_ok = 0, scroll_pos = 0;
-    const uint8_t txt[] = {LED_NUM[11], LED_NUM[12], LED_NUM[13], LED_NUM[14], BLANK, BLANK};
+    // Текст для зсуву (наприклад, AbCd)
+    const uint8_t txt[] = {0x88, 0x83, 0xC6, 0xA1, BLANK, BLANK}; 
 
     for (;;) {
         matrix_read();
@@ -116,6 +117,7 @@ int main(void) {
             for (int c = 0; c < COLS; c++) {
                 if (keys[r][c] == 0 && last_keys[r][c] == 1) {
                     uint8_t val = num_map[r][c];
+                    // Клавіша "*" або нижня ліва як перемикач
                     if (val == 0xFF && current_state != ST_PASS_INPUT) {
                         current_state = ST_PASS_INPUT; pass_idx = 0;
                         for(int i=0; i<8; i++) disp_buf[i] = BLANK;
@@ -133,6 +135,7 @@ int main(void) {
             }
         }
 
+        // Обробка результату пароля
         if (current_state == ST_PASS_RESULT && flag_500ms) {
             flag_500ms = 0;
             for(int i=0; i<8; i++) disp_buf[i] = (blink_count % 2 == 0) ? (pass_ok ? LED_NUM[1] : LED_NUM[0]) : BLANK;
@@ -142,17 +145,24 @@ int main(void) {
             }
         }
 
+        // РЕЖИМ ВИКОНАННЯ (5 варіант: таймер фіксований, наступні вправо)
         if (current_state == ST_RUNNING) {
             if (flag_500ms) {
                 flag_500ms = 0;
                 scroll_pos = (scroll_pos + 1) % 6;
-                for(int i=0; i<4; i++) disp_buf[4 + i] = txt[(6 + i - scroll_pos) % 6];
+                // Наступні 4 розряди (4-7) - зсув вправо
+                for(int i=0; i<4; i++) {
+                    disp_buf[4 + i] = txt[(6 + i - scroll_pos) % 6];
+                }
             }
             if (flag_1sec) {
                 flag_1sec = 0;
                 if (t_sec == 0) { if (t_min > 0) { t_min--; t_sec = 59; } } else t_sec--;
-                disp_buf[0] = LED_NUM[0]; disp_buf[1] = LED_NUM[t_min] & 0x7F;
-                disp_buf[2] = LED_NUM[t_sec / 10]; disp_buf[3] = LED_NUM[t_sec % 10];
+                // Перші 4 розряди (0-3) - фіксований таймер
+                disp_buf[0] = LED_NUM[0]; 
+                disp_buf[1] = LED_NUM[t_min] & 0x7F; // Крапка
+                disp_buf[2] = LED_NUM[t_sec / 10]; 
+                disp_buf[3] = LED_NUM[t_sec % 10];
             }
         }
         CyDelay(10);
