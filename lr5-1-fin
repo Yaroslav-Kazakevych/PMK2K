@@ -1,0 +1,298 @@
+#include "project.h"
+#include <stdbool.h>
+
+#define ROWS 4
+#define COLS 3
+
+// Матриця клавіатури: визначає символи для кожної комбінації рядок/стовпчик
+static const char key_map[ROWS][COLS] = {
+    {'1', '2', '3'},
+    {'4', '5', '6'},
+    {'7', '8', '9'},
+    {'*', '0', '#'}
+};
+
+static uint8_t keys[ROWS][COLS];
+static uint8_t last_keys[ROWS][COLS];
+
+
+const uint8_t font[10] = {
+    0xC0, // Цифра 0: сегменти A,B,C,D,E,F увімкнені (1100 0000)
+    0xF9, // Цифра 1: сегменти B,C увімкнені (1111 1001)
+    0xA4, // Цифра 2: сегменти A,B,D,E,G увімкнені (1010 0100)
+    0xB0, // Цифра 3: сегменти A,B,C,D,G увімкнені (1011 0000)
+    0x99, // Цифра 4: сегменти B,C,F,G увімкнені (1001 1001)
+    0x92, // Цифра 5: сегменти A,C,D,F,G увімкнені (1001 0010)
+    0x82, // Цифра 6: сегменти A,C,D,E,F,G увімкнені (1000 0010)
+    0xF8, // Цифра 7: сегменти A,B,C увімкнені (1111 1000)
+    0x80, // Цифра 8: всі основні сегменти (A-G) увімкнені (1000 0000)
+    0x90  // Цифра 9: сегменти A,B,C,D,F,G увімкнені (1001 0000)
+};
+
+// Спеціальні символи та літери
+const uint8_t BLANK = 0xFF; // Порожньо: всі сегменти вимкнені (1111 1111)
+const uint8_t DASH  = 0xBF; // Символ "-": тільки центральний сегмент G (1011 1111)
+const uint8_t SYM_A = 0x88; // Літера 'A': сегменти A,B,C,E,F,G (1000 1000)
+const uint8_t SYM_C = 0xC6; // Літера 'C': сегменти A,D,E,F (1100 0110)
+const uint8_t SYM_E = 0x86; // Літера 'E': сегменти A,D,E,F,G (1000 0110)
+const uint8_t SYM_S = 0x92; // Літера 'S' (ідентична цифрі 5): (1001 0010)
+const uint8_t SYM_r = 0xAF; // Літера 'r' (мала): сегменти E,G (1010 1111)
+const uint8_t SYM_o = 0xA3; // Літера 'o' (мала): сегменти C,D,E,G (1010 0011)
+
+// display_data зберігає поточний стан всіх 8 розрядів індикатора
+volatile uint8_t display_data[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+volatile uint32_t system_tick_ms = 0; 
+
+/**
+ * Передача байта в зсувний регістр 74HC595.
+ */
+static void HC595_sendByte(uint8_t data) {
+    for (uint8_t i = 0; i < 8; i++) {
+        // Перевірка кожного біта зсувом: 0x80 — це 1000 0000 (старший біт)
+        Pin_DO_Write((data & (0x80 >> i)) ? 1 : 0);
+        Pin_CLK_Write(1); // Імпульс синхронізації
+        Pin_CLK_Write(0);
+    }
+}
+
+// Керування режимом роботи пінів стовпчиків
+static void col_drive(uint8_t col, uint8_t m) {
+    switch (col) {
+        case 0: COLUMN_0_SetDriveMode(m); break;
+        case 1: COLUMN_1_SetDriveMode(m); break;
+        case 2: COLUMN_2_SetDriveMode(m); break;
+    }
+}
+
+// Запис значення у стовпчик
+static void col_write(uint8_t col, uint8_t val) {
+    switch (col) {
+        case 0: COLUMN_0_Write(val); break;
+        case 1: COLUMN_1_Write(val); break;
+        case 2: COLUMN_2_Write(val); break;
+    }
+}
+
+// Читання стану рядка клавіатури
+static uint8_t row_read(uint8_t row) {
+    switch (row) {
+        case 0: return ROW_0_Read();
+        case 1: return ROW_1_Read();
+        case 2: return ROW_2_Read();
+        case 3: return ROW_3_Read();
+        default: return 1;
+    }
+}
+
+// Керування RGB світлодіодом (інверсна логіка або спільний анод залежно від схеми)
+static void rgb_set(uint8_t r, uint8_t g, uint8_t b) {
+    LED_R_Write(r);
+    LED_G_Write(g);
+    LED_B_Write(b);
+}
+
+// Ініціалізація матриці клавіатури: встановлення стовпчиків у стан High-Z (високий опір)
+static void matrix_init(void) {
+    for (int c = 0; c < COLS; c++) col_drive(c, COLUMN_0_DM_DIG_HIZ);
+    for (int r = 0; r < ROWS; r++)
+        for (int c = 0; c < COLS; c++) last_keys[r][c] = 1;
+}
+
+// Сканування матриці: по черзі подаємо "0" на стовпчики та читаємо рядки
+static void matrix_read(void) {
+    for (int c = 0; c < COLS; c++) {
+        col_drive(c, COLUMN_0_DM_STRONG); // Перемикаємо в активний режим
+        col_write(c, 0); // Подаємо логічний нуль
+        for (int r = 0; r < ROWS; r++) keys[r][c] = row_read(r);
+        col_write(c, 1);
+        col_drive(c, COLUMN_0_DM_DIG_HIZ); // Повертаємо в High-Z
+    }
+}
+
+// Отримання символу натиснутої клавіші (обробка лише моменту натискання)
+char get_key(void) {
+    char pressed = 0;
+    matrix_read();
+    for (int r = 0; r < ROWS; r++) {
+        for (int c = 0; c < COLS; c++) {
+            if (keys[r][c] == 0 && last_keys[r][c] == 1) { // Виявлення спаду сигналу
+                pressed = key_map[r][c];
+            }
+            last_keys[r][c] = keys[r][c];
+        }
+    }
+    return pressed;
+}
+
+/**
+ * ОБРОБНИК ПЕРЕРИВАННЯ ТАЙМЕРА (1 мс)
+ * Виконує динамічну індикацію: відображає по одному розряду за раз.
+ */
+CY_ISR(Timer_Int_Handler) {
+    static uint8_t digit_idx = 0;
+
+    // 1. Надсилаємо байт вибору розряду (позиційний код)
+    // 0xFF — це 1111 1111. Операція ~(1u << idx) створює "0" у потрібному розряді (активний рівень 0)
+    HC595_sendByte(0xFF & ~(1u << digit_idx)); 
+    
+    // 2. Надсилаємо дані сегментів для цього розряду
+    HC595_sendByte(display_data[digit_idx]);
+    
+    // 3. Генеруємо імпульс на защіпку (Latch) для оновлення виходів регістра
+    Pin_Latch_Write(1);
+    Pin_Latch_Write(0);
+
+    digit_idx++;
+    if (digit_idx > 7) digit_idx = 0;
+    
+    system_tick_ms++; // Глобальний лічильник мілісекунд
+}
+
+void clear_display() {
+    for(int i=0; i<8; i++) display_data[i] = BLANK;
+}
+
+int main(void) {
+    CyGlobalIntEnable;
+    SW_Tx_UART_Start();
+    matrix_init();
+
+    // Запуск апаратного таймера та реєстрація обробника переривань
+    Timer_Start(); 
+    Timer_int_StartEx(Timer_Int_Handler);
+
+    uint8_t mode = 0;            
+    uint32_t timer_sec = 300;     // Початкове значення: 5 хвилин
+    uint32_t last_timer_tick = 0;
+    
+    // Параметри для режиму зсуву (Варіант 4)
+    uint8_t shift_offset = 0;
+    uint32_t last_shift_time = 0;
+    const uint8_t shift_sequence[8] = {font[1], font[2], font[3], font[4], font[5], font[6], font[7], font[8]};
+    
+    // Дані для роботи з паролем
+    char pass_input[4] = {0};
+    uint8_t pass_index = 0;
+    const char CORRECT_PASS[] = "1234";
+
+    clear_display();
+    rgb_set(1, 0, 1); // Зелений колір (R=1-off, G=0-on, B=1-off для спільного анода)
+
+    for (;;) {
+        char key = get_key();
+        
+        // Перемикання режимів кнопкою '*'
+        if (key == '*') {
+            mode++;
+            if (mode > 3) mode = 0;
+            clear_display();
+            
+            // Налаштування індикації та стану для кожного режиму
+            if (mode == 0) rgb_set(1, 0, 1); // Режим 0: Зелений
+            if (mode == 1) rgb_set(0, 1, 1); // Режим 1: Червоний
+            if (mode == 2) { 
+                rgb_set(1, 1, 0);             // Режим 2: Синій
+                timer_sec = 300; 
+                last_timer_tick = system_tick_ms; 
+            }
+            if (mode == 3) {
+                rgb_set(0, 0, 1);             // Режим 3: Жовтий (R+G увімкнені)
+                pass_index = 0;
+            }
+        }
+        
+        // 0: Статичний вивід (число 28)
+        if (mode == 0) {
+            display_data[0] = font[2];
+            display_data[1] = font[8];
+            for (int i = 2; i < 8; i++) display_data[i] = BLANK;
+        }
+        
+        // 1: Циклічний зсув (перші 4 розряди)
+        else if (mode == 1) {
+            display_data[4] = DASH;
+            display_data[5] = DASH;
+            display_data[6] = DASH;
+            display_data[7] = DASH;
+            
+            if (system_tick_ms - last_shift_time >= 400) {
+                last_shift_time = system_tick_ms;
+                shift_offset++;
+            }
+            
+            for(int i = 0; i < 4; i++) {
+                display_data[i] = shift_sequence[(shift_offset + i) % 8];
+            }
+        }
+        
+        // 2: Зворотний відлік (Таймер)
+        else if (mode == 2) {
+            if (system_tick_ms - last_timer_tick >= 1000) {
+                uint32_t passed_secs = (system_tick_ms - last_timer_tick) / 1000;
+                last_timer_tick += passed_secs * 1000; 
+                
+                if (timer_sec > passed_secs) {
+                    timer_sec -= passed_secs;
+                } else {
+                    timer_sec = 0; // Зупинка на 00:00
+                }
+            }
+            
+            int mins = timer_sec / 60;
+            int secs = timer_sec % 60;
+            
+            display_data[0] = font[mins / 10];
+            // 0x7F — це 0111 1111. Операція & 0x7F примусово вмикає 7-й біт (крапку)
+            display_data[1] = font[mins % 10] & 0x7F; 
+            display_data[2] = font[secs / 10];
+            display_data[3] = font[secs % 10];
+            for (int i = 4; i < 8; i++) display_data[i] = BLANK;
+        }
+        
+        // 3: Система контролю доступу (Пароль)
+        else if (mode == 3) {
+            if (key >= '0' && key <= '9' && pass_index < 4) {
+                pass_input[pass_index] = key;
+                display_data[pass_index] = font[key - '0'];
+                pass_index++;
+                
+                if (pass_index == 4) {
+                    bool is_correct = true;
+                    for (int i = 0; i < 4; i++) {
+                        if (pass_input[i] != CORRECT_PASS[i]) is_correct = false;
+                    }
+                    
+                    if (is_correct) {
+                        rgb_set(1, 0, 1); // Доступ дозволено: Зелений
+                        display_data[0] = SYM_A;
+                        display_data[1] = SYM_C;
+                        display_data[2] = SYM_C;
+                        display_data[3] = SYM_E;
+                        display_data[4] = SYM_S;
+                        display_data[5] = SYM_S;
+                        display_data[6] = BLANK;
+                        display_data[7] = BLANK;
+                    } else {
+                        rgb_set(0, 1, 1); // Помилка: Червоний
+                        display_data[0] = SYM_E;
+                        display_data[1] = SYM_r;
+                        display_data[2] = SYM_r;
+                        display_data[3] = SYM_o;
+                        display_data[4] = SYM_r;
+                        display_data[5] = BLANK;
+                        display_data[6] = BLANK;
+                        display_data[7] = BLANK;
+                    }
+                    
+                    CyDelay(2000); // Пауза 2 секунди для перегляду результату
+                    
+                    mode = 0; // Повернення до початкового стану
+                    clear_display();
+                    rgb_set(1, 0, 1);
+                }
+            }
+        }
+        
+        CyDelay(10);
+    }
+}
